@@ -1,0 +1,1114 @@
+#!/usr/bin/python
+#
+# Copyright 2025 yucef sourani
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+import sys
+import os
+import gi
+import gettext
+import json
+import uuid
+import tempfile
+import datetime
+import hashlib
+gi.require_version("Gtk","4.0")
+gi.require_version('Adw', '1')
+from gi.repository import Gtk,Gio,Adw,GLib,GObject,Gdk
+from binascii import hexlify
+import codecs
+import x25519
+
+
+class Key():
+    @staticmethod
+    def key_pair():
+        private_key = os.urandom(32)
+        public_key  = x25519.scalar_base_mult(private_key)
+        #peer_public_key = os.urandom(32)
+
+        #shared_secret   = x25519.scalar_mult(private_key, peer_public_key)
+        return codecs.encode(private_key, 'base64').decode('utf8').strip(),codecs.encode(public_key, 'base64').decode('utf8').strip()
+
+PROG_NAME = "simplewgconfig"
+DATADIR   = GLib.get_user_data_dir()
+os.makedirs(os.path.join(GLib.get_user_config_dir(),PROG_NAME),exist_ok=True)
+default_metadata_file_name  = os.path.join(GLib.get_user_config_dir(),PROG_NAME,f"{PROG_NAME}.json")
+default_save_files_location = os.path.join(GLib.get_user_config_dir(),PROG_NAME,"saved_config_files")
+os.makedirs(default_save_files_location,exist_ok=True)
+default_metadata = {"Server" : {"FirewallType" : "Firewalld","Iface Name" : "", "Address" : "","Address Ipv6":"","ListenPort" : "","PrivateKey" :"","PublicKey" : "","Endpoint":"server real ip or domain"}, "clients" : {} }
+ERROR_CSS_CLASS = "error"
+ditro_firewall_config = {
+    "Firewalld" : f"""PostUp = firewall-cmd --zone=public --add-port={{}}/udp
+PostUp = firewall-cmd --zone=trusted --add-interface={{}}
+PreDown = firewall-cmd --zone=public --remove-port={{}}/udp
+PreDown = firewall-cmd --zone=trusted --remove-interface={{}}""",
+    "Ufw" : f"""PostUp = ufw allow {{0}}/udp
+PostUp = ufw route allow in on {{1}} out on {{2}}
+PostUp = iptables -t nat -I POSTROUTING -o {{2}} -j MASQUERADE
+PostUp = ip6tables -t nat -I POSTROUTING -o {{2}} -j MASQUERADE
+PreDown = ufw deny {{0}}/udp
+PreDown = ufw route delete allow in on {{1}} out on {{2}}
+PreDown = iptables -t nat -D POSTROUTING -o {{2}} -j MASQUERADE
+PreDown = ip6tables -t nat -D POSTROUTING -o {{2}} -j MASQUERADE"""
+}
+
+firewall_config = ""
+
+css = b"""
+        .keys_label text {font-family: monospace;
+        }
+
+"""
+def get_metadata_info():
+    if not os.path.isfile(default_metadata_file_name):
+        with open(default_metadata_file_name,"w",encoding="utf-8") as mf:
+            json.dump(default_metadata,mf ,indent=4)
+        return get_metadata_info()
+    try:
+        with open(default_metadata_file_name,encoding="utf-8") as mf:
+            result = json.load(mf)
+    except Exception as e:
+        print(e)
+        return False
+    return result
+
+
+def change_metadata_info(data):
+    if not os.path.isfile(default_metadata_file_name) and os.path.exists(default_metadata_file_name):
+        return False
+    try:
+        with open(default_metadata_file_name,"w",encoding="utf-8") as mf:
+            result = json.dump(data,mf ,indent=4)
+    except Exception as e:
+        print(e)
+        return False
+    return result
+
+def fix_certifi():
+    if getattr(sys, 'frozen',False) and hasattr(sys, '_MEIPASS'):
+        import ssl
+        if ssl.get_default_verify_paths().cafile is None:
+            try:
+                import certifi
+                cert_l = certifi.where()
+                if os.path.isfile(cert_l):
+                    os.environ['SSL_CERT_FILE'] = cert_l
+                else:
+                    os.environ['SSL_CERT_FILE'] = os.path.join(sys._MEIPASS, 'certifi', 'cacert.pem')
+            except:
+                try:
+                    _create_unverified_https_context = ssl._create_unverified_context
+                except AttributeError:
+                    pass
+                else:
+                    ssl._create_default_https_context = _create_unverified_https_context
+fix_certifi()
+
+MENU_XML="""
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <menu id="app-menu">
+    <section>
+      <item>
+        <attribute name="action">win.open_save_location</attribute>
+        <attribute name="label" translatable="yes">_Open Save Location</attribute>
+      </item>
+      <item>
+        <attribute name="action">win.about</attribute>
+        <attribute name="label" translatable="yes">_About</attribute>
+      </item>
+      <item>
+        <attribute name="action">win.quit</attribute>
+        <attribute name="label" translatable="yes">_Quit</attribute>
+        <attribute name="accel">&lt;Primary&gt;Q</attribute>
+    </item>
+    </section>
+  </menu>
+</interface>
+"""
+
+def get_ipv6_base():
+    now    = str(datetime.datetime.now().timestamp()).encode("utf-8")
+    hash_r = hashlib.sha1(now).hexdigest()[30:]
+    result = ""
+    for i in hash_r[::2]:
+        result += i+hash_r[hash_r.index(i)+1]+":"
+    result += ":"
+    return result
+
+class WgClient(GObject.Object):
+    @GObject.Property(type=str,default="")
+    def id(self):
+        return self.__id
+
+    @GObject.Property(type=bool,default=True)
+    def sensitive(self):
+        return self.__sensitive
+
+    @sensitive.setter
+    def sensitive(self, sensitive):
+        if sensitive == True:
+            if not all([self.props.privatekey,
+                        self.props.publickey,
+                        self.props.dns,
+                        self.props.allowedips,
+                        self.props.persistentKeepalive]):
+                self.__sensitive = False
+            else:
+                self.__sensitive = sensitive
+        else:
+            self.__sensitive = sensitive
+
+    @GObject.Property(type=str,default="")
+    def privatekey(self):
+        return self.__privatekey
+
+    @privatekey.setter
+    def privatekey(self, privatekey):
+        self.__privatekey = privatekey.strip()
+        #self.emit("privatekey",self.__privatekey)
+        self.change_peer_settings("PrivateKey",self.__privatekey)
+
+    @GObject.Property(type=str,default="")
+    def publickey(self):
+        return self.__publickey
+
+    @publickey.setter
+    def publickey(self, publickey):
+        self.__publickey = publickey.strip()
+        #self.emit("publickey",self.__publickey)
+        self.change_peer_settings("PublicKey",self.__publickey)
+
+    @GObject.Property(type=str,default="")
+    def dns(self):
+        return self.__dns
+
+    @dns.setter
+    def dns(self, dns):
+        self.__dns = dns.strip()
+        #self.emit("dns",self.__dns)
+        self.change_peer_settings("DNS",self.__dns)
+
+    @GObject.Property(type=str,default="")
+    def allowedips(self):
+        return self.__allowedips
+
+    @allowedips.setter
+    def allowedips(self, allowedips):
+        self.__allowedips = allowedips.strip()
+        #self.emit("allowedips",self.__allowedips)
+        self.change_peer_settings("AllowedIPs",self.__allowedips)
+
+    @GObject.Property(type=str,default="")
+    def persistentKeepalive(self):
+        return self.__persistentKeepalive
+
+    @persistentKeepalive.setter
+    def persistentKeepalive(self, persistentKeepalive):
+        self.__persistentKeepalive = persistentKeepalive.strip()
+        #self.emit("persistentkeepalive",self.__persistentkeepalive)
+        self.change_peer_settings("PersistentKeepalive",self.__persistentKeepalive)
+
+    @GObject.Property(type=str,default="")
+    def address(self):
+        return self.__address
+
+    @address.setter
+    def address(self, address):
+        self.__address = address.strip()
+        #self.emit("allowedips",self.__allowedips)
+        self.change_peer_settings("Address",self.__address)
+
+
+    def __init__(self,id_,config__):
+        GObject.Object.__init__(self)
+        self.__id                  = id_
+        self.__privatekey          = None
+        self.__publickey           = None
+        self.__dns                 = None
+        self.__allowedips          = None
+        self.__persistentKeepalive = None
+        self.__address             = None
+        self.config__              = config__
+        self.__sensitive           = True
+
+    def change_peer_settings(self,section,value):
+        self.config__["clients"][self.props.id][section] = value
+        change_metadata_info(self.config__)
+
+class PeerRow():
+    def __init__(self,wgclient,prop_name):
+        self.wgclient  = wgclient
+        self.prop_name = prop_name
+        if self.prop_name == "privatekey":
+            self.row = Adw.PasswordEntryRow.new()
+            self.row.add_css_class("keys_label")
+        else:
+            self.row       = Adw.EntryRow.new()
+            if self.prop_name == "publickey":
+                self.row.add_css_class("keys_label")
+            if self.prop_name == "allowedips":
+                switch = Gtk.Switch.new()
+                self.row_handler = self.row.connect("notify::text",self.on_allowedips_changed,switch)
+                if "0.0.0.0/0" in self.wgclient.allowedips.strip().split(","):
+                    switch.set_active(True)
+                switch.props.vexpand = False
+                switch.props.hexpand = False
+                self.switch_handler = switch.connect("notify::active",self.on_switch_active,self.row)
+                t = Gtk.Label.new("Forward")
+                t.props.vexpand = False
+                t.props.hexpand = False
+                b = Gtk.Box.new( Gtk.Orientation.VERTICAL,2)
+                b.props.vexpand = False
+                b.props.hexpand = False
+                b.append(t)
+                b.append(switch)
+                g = Gtk.Grid.new()
+                g.set_valign(Gtk.Align.CENTER)
+                g.set_halign(Gtk.Align.CENTER)
+                g.attach(b,0,0,20,20)
+                self.row.add_suffix(g)
+        self.row.set_title(self.prop_name.title())
+        v = self.wgclient.get_property(self.prop_name)
+        self.row.set_text(v)
+        if not v:
+            self.row.add_css_class(ERROR_CSS_CLASS)
+            self.wgclient.props.sensitive = False
+        self.row.bind_property("text", self.wgclient, self.prop_name, GObject.BindingFlags.BIDIRECTIONAL )
+        self.row .set_input_hints( Gtk.InputHints.NO_EMOJI |Gtk.InputHints.NO_SPELLCHECK)
+        self.row.connect("notify::text",self.on_text_changed)
+
+    def on_allowedips_changed(self,row,prop,switch):
+        text = row.get_text().strip()
+        if not text:
+            with switch.handler_block(self.switch_handler):
+                switch.set_active(False)
+        else:
+            if "0.0.0.0/0" in text.split(","):
+                with switch.handler_block(self.switch_handler):
+                    switch.set_active(True)
+            else:
+                with switch.handler_block(self.switch_handler):
+                    switch.set_active(False)
+
+    def on_text_changed(self,row,prop):
+        if  self.row.props.text:
+            self.row.remove_css_class(ERROR_CSS_CLASS)
+            self.wgclient.props.sensitive = True
+        else:
+            self.row.add_css_class(ERROR_CSS_CLASS)
+            self.wgclient.props.sensitive = False
+
+    def on_switch_active(self,switch,prop,row):
+        text = row.get_text().strip()
+        if not text :
+            if  switch.props.active:
+                with self.row.handler_block(self.row_handler):
+                    self.wgclient.allowedips = "0.0.0.0/0"
+            return
+        stext = text.split(",")
+        if len(stext) == 1:
+            if not switch.props.active:
+                if "0.0.0.0/0" in stext:
+                    with self.row.handler_block(self.row_handler):
+                        self.wgclient.allowedips = ""
+            else:
+                if "0.0.0.0/0" not in stext:
+                    with self.row.handler_block(self.row_handler):
+                        self.wgclient.allowedips = self.wgclient.allowedips+","+"0.0.0.0/0"
+        else:
+            if not switch.props.active:
+                if "0.0.0.0/0" in stext:
+                    while "0.0.0.0/0" in stext:
+                        stext.remove("0.0.0.0/0")
+                    with self.row.handler_block(self.row_handler):
+                        self.wgclient.allowedips = ",".join(stext)
+            else:
+                if "0.0.0.0/0" not in stext:
+                    stext.append("0.0.0.0/0")
+                    with self.row.handler_block(self.row_handler):
+                        self.wgclient.allowedips = ",".join(stext)
+
+def get_correct_path(relative_path):
+    if sys.platform.startswith('win'):
+        if getattr(sys, 'frozen',False) and hasattr(sys, '_MEIPASS'):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.abspath(".")
+    else:
+        exedir = os.path.dirname(sys.argv[0])
+        p      = os.path.join(exedir,'..', 'share')
+        if not os.path.exists(p):
+            base_path = exedir
+        else :
+            base_path = p
+
+    return os.path.join(base_path, relative_path)
+
+def fix_locale():
+    if sys.platform.startswith('win'):
+        import locale
+        if os.getenv('LANG') is None:
+            lang, enc = locale.getdefaultlocale()
+            os.environ['LANG'] = lang
+    is_pyinstaller = getattr(sys, 'frozen',False) and hasattr(sys, '_MEIPASS')
+    if   is_pyinstaller:
+        ld = get_correct_path('locale')
+    else:
+        exedir = os.path.dirname(sys.argv[0])
+        ld = os.path.join(exedir,'..', 'share', 'locale')
+        if not os.path.exists(ld):
+            ld = os.path.join(exedir, 'locale')
+    gettext.install(PROG_NAME, localedir=ld)
+fix_locale()
+
+class MainWindow(Adw.ApplicationWindow):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.set_size_request(420, 420)
+        #self.set_default_size(800, 600)
+        self.maximize()
+        style_provider = Gtk.CssProvider()
+        style_provider.load_from_data(css)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display().get_default(),
+                                                 style_provider,
+                                                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.app_ = self.get_application()
+        self.config__ = get_metadata_info()
+        self.mainvbox = Gtk.Box.new( Gtk.Orientation.VERTICAL,5)
+        self.toastoverlay =  Adw.ToastOverlay.new()
+        self.toastoverlay.set_child(self.mainvbox)
+        self.set_content(self.toastoverlay )
+        self.headerbar = Adw.HeaderBar.new()
+
+        quit_action = Gio.SimpleAction.new("quit", None) # look at MENU_XML win.quit
+        quit_action.connect("activate", self.on_quit_action_actived)
+        self.add_action(quit_action) # (self window) == win in MENU_XML
+
+        about_action = Gio.SimpleAction.new("about", None) # look at MENU_XML win.about
+        about_action.connect("activate", self.run_about)
+        self.add_action(about_action) # (self window) == win in MENU_XML
+
+        open_action = Gio.SimpleAction.new("open_save_location", None)
+        open_action.connect("activate", self.on_open_save_location_action_activate)
+        self.add_action(open_action)
+
+
+        self.menu_button = Gtk.MenuButton.new()
+        self.headerbar.pack_end(self.menu_button) # or pack_start
+        menu = Gtk.Builder.new_from_string(MENU_XML, -1).get_object("app-menu")
+        self.menu_button.set_icon_name("open-menu-symbolic") # from Pre-installed standard linux icon names
+        #https://specifications.freedesktop.org/icon-naming-spec/latest/ar01s04.html
+        self.menu_button.set_menu_model(menu)
+
+        viewswitcher = Adw.ViewSwitcher.new()
+        self.headerbar.set_title_widget(viewswitcher)
+        self.mainvbox.append(self.headerbar)
+
+        self.stack =  Adw.ViewStack.new()
+        viewswitcher.set_stack(self.stack)
+        self.stack.props.hexpand = True
+        self.stack.props.vexpand = True
+        self.mainvbox.append(self.stack)
+
+        self.create_server_gui()
+        self.create_peer_gui()
+
+        viewswitchbar = Adw.ViewSwitcherBar.new()
+        viewswitchbar.set_stack(self.stack)
+        self.headerbar.set_title_widget(viewswitcher)
+        self.mainvbox.append(viewswitchbar)
+
+        breakpoint_c = Adw.BreakpointCondition.new_length(Adw.BreakpointConditionLengthType.MAX_WIDTH ,550, Adw.LengthUnit.SP)
+        breakpoint_ = Adw.Breakpoint.new(breakpoint_c)
+        breakpoint_.add_setter(self.headerbar,"show_title",False)
+        breakpoint_.add_setter(viewswitchbar,"reveal",True)
+        self.add_breakpoint(breakpoint_)
+
+
+    def change_server_settings_changed(self,row,section,flush=True):
+        self.stack.get_page(self.stack.get_child_by_name("server")).set_needs_attention(False)
+        value = row.get_text().strip()
+        if value:
+            row.remove_css_class(ERROR_CSS_CLASS)
+        else:
+            row.add_css_class(ERROR_CSS_CLASS)
+        self.config__["Server"][section] = value
+        if flush:
+            change_metadata_info(self.config__)
+
+    def on_port_change(self,row,prop,flush=True):
+        value = str(int(row.get_value()))
+        self.config__["Server"]["ListenPort"] = value
+        if flush:
+            change_metadata_info(self.config__)
+
+    def on_generate_keypair_dialog_alert_done(self,dialog, resutl, server_page_key_group):
+        try:
+            response = dialog.choose_finish(resutl)
+            if response == "3007":
+                private_key,public_key = Key.key_pair()
+                loop = GLib.MainContext.default()
+                while loop.pending():
+                    loop.iteration(True)
+
+                GLib.timeout_add(100,server_page_key_group.PrivateKey.set_text,str(private_key))
+                GLib.timeout_add(100,server_page_key_group.PublicKey.set_text,str(public_key))
+                while loop.pending():
+                    loop.iteration(True)
+                self.config__["Server"]["PrivateKey"] = private_key
+                self.config__["Server"]["PublicKey"]  = public_key
+                change_metadata_info(self.config__)
+                server_page_key_group.PrivateKey.remove_css_class(ERROR_CSS_CLASS)
+                server_page_key_group.PublicKey.remove_css_class(ERROR_CSS_CLASS)
+                self.toastoverlay.add_toast(Adw.Toast(title="Generate Kaypair Done.",timeout=2))
+                self.stack.get_page(self.stack.get_child_by_name("server")).set_needs_attention(False)
+        except :
+            self.toastoverlay.add_toast(Adw.Toast.new("Generate Kaypair Failed."))
+            return
+
+    def open_generate_keypair_dialog_alert(self,button,server_page_key_group):
+        dialog = Adw.AlertDialog.new("Generate Keypair","generate keypair")
+        dialog.add_response("3007","Generate")
+        dialog.add_response("0205","Cancel")
+        dialog.choose(self,None,self.on_generate_keypair_dialog_alert_done,server_page_key_group)
+
+
+    def change_peer_settings_changed(self,row,section,flush=True):
+        value = row.get_text().strip()
+        self.config__["clients"][row.__index][section] = value
+        if flush:
+            change_metadata_info(self.config__)
+
+    def on_add_peer_row_activated(self,row,peer_page):
+        try:
+            a = self.address_name_row.get_text()
+            if not a[-1].isdigit():
+                self.toastoverlay.add_toast(Adw.Toast.new("ERROR! Check Server Address."))
+                self.stack.get_page(self.stack.get_child_by_name("server")).set_needs_attention(True)
+                self.address_name_row.add_css_class(ERROR_CSS_CLASS)
+                return
+            address = a.split("/")[0]
+            r = 1
+            while str(r) == address.split(".")[-1] or str(r) in [v["Address"].split("/")[0].split(".")[-1] for v in self.config__["clients"].values() ] :
+                r += 1
+            r=min(r,200)
+            address = ".".join(address.split(".")[0:3])+"."+str(r)+"/"+a.split("/")[1]
+        except :
+            self.toastoverlay.add_toast(Adw.Toast.new("ERROR! Check Server Ipv4 Address."))
+            self.stack.get_page(self.stack.get_child_by_name("server")).set_needs_attention(True)
+            self.address_name_row.add_css_class(ERROR_CSS_CLASS)
+            return
+        private_key,public_key = Key.key_pair()
+        temp_info =  {"PrivateKey" : private_key,"PublicKey":public_key,"DNS":"1.1.1.1","AllowedIPs":"0.0.0.0/0","PersistentKeepalive":"25","Address" : address}
+        id_ = uuid.uuid4().hex
+        self.config__["clients"].setdefault(id_,temp_info)
+        change_metadata_info(self.config__)
+        wgclient = WgClient(id_,self.config__)
+        peer_page_group =  Adw.PreferencesGroup.new()
+        peer_page.add(peer_page_group)
+        peer_page_group.set_title("Peer")
+
+
+
+        wgclient.props.privatekey          = temp_info["PrivateKey"]
+        wgclient.props.publickey           = temp_info["PublicKey"]
+        wgclient.props.dns                 = temp_info["DNS"]
+        wgclient.props.allowedips          = temp_info["AllowedIPs"]
+        wgclient.props.persistentKeepalive = temp_info["PersistentKeepalive"]
+        wgclient.props.address             = temp_info["Address"]
+
+        adress_row              = PeerRow(wgclient,"address")
+        privatekey_row          = PeerRow(wgclient,"privatekey")
+        publickey_row           = PeerRow(wgclient,"publickey")
+        dns_row                 = PeerRow(wgclient,"dns")
+        allowedips_row          = PeerRow(wgclient,"allowedips")
+        persistentKeepalive_row = PeerRow(wgclient,"persistentKeepalive")
+
+        peer_page_group.add(adress_row.row)
+        peer_page_group.add(privatekey_row.row)
+        peer_page_group.add(publickey_row.row)
+        peer_page_group.add(dns_row.row)
+        peer_page_group.add(allowedips_row.row)
+        peer_page_group.add(persistentKeepalive_row.row)
+
+
+        generate_peer_config_row = Adw.PreferencesRow.new()
+        peer_page_group.add(generate_peer_config_row)
+        generate_peer_config_row_box = Gtk.Box.new( Gtk.Orientation.HORIZONTAL,0)
+        generate_peer_config_row_box.add_css_class("linked")
+        generate_peer_config_row_box.set_homogeneous(True)
+        generate_peer_config_row.set_child(generate_peer_config_row_box)
+
+        clipboard_button_content = Adw.ButtonContent(label="Generate To Clipboard",icon_name="edit-copy-symbolic")
+        clipboard_config_button = Gtk.Button.new()
+        clipboard_config_button.props.hexpand = True
+        clipboard_config_button.set_child(clipboard_button_content)
+        clipboard_config_button.add_css_class("suggested-action")
+        generate_peer_config_row_box.append(clipboard_config_button)
+
+        save_button_content = Adw.ButtonContent(label="Save To File",icon_name="document-save-symbolic")
+        save_config_button = Gtk.Button.new()
+        save_config_button.props.hexpand = True
+        save_config_button.set_child(save_button_content)
+        save_config_button.add_css_class("suggested-action")
+        generate_peer_config_row_box.append(save_config_button)
+
+        group_button_box   = Gtk.Box.new( Gtk.Orientation.HORIZONTAL,0)
+        group_button_box.add_css_class("linked")
+        delete_button      = Gtk.Button(icon_name="edit-delete-symbolic")
+        delete_button.add_css_class("destructive-action")
+        delete_button.connect("clicked",self.on_delete_peer_clicked,peer_page_group,id_)
+        generatekey_button = Gtk.Button(label="Generate Keys")
+        generatekey_button.connect("clicked",self.on_generatekey_peer_clicked,privatekey_row,publickey_row,id_)
+        generatekey_button.add_css_class("suggested-action")
+
+        clipboard_config_button.connect("clicked",self.on_peer_generate_config_clicked,id_)
+        save_config_button.connect("clicked",self.on_peer_generate_config_clicked,id_,True)
+        clipboard_config_button.bind_property("sensitive", wgclient, "sensitive", GObject.BindingFlags.BIDIRECTIONAL )
+        save_config_button.bind_property("sensitive", wgclient, "sensitive", GObject.BindingFlags.BIDIRECTIONAL )
+        #wgclient.props.sensitive = False
+        group_button_box.append(generatekey_button)
+        group_button_box.append(delete_button)
+        peer_page_group.set_header_suffix(group_button_box)
+        scrolled_window = peer_page_group.get_parent().get_parent().get_parent().get_parent()
+        v = scrolled_window.get_vadjustment()
+        GLib.timeout_add(100,v.set_value,scrolled_window.get_vadjustment().get_upper()) # scrooll to end
+        self.toastoverlay.add_toast(Adw.Toast(title="Add New Peer Done.",timeout=2))
+
+
+    def on_peer_generate_config_clicked(self,button,id_,generate_file=False,location_to_save=""):
+        if not self.public_key_row.get_text().strip() :
+            self.toastoverlay.add_toast(Adw.Toast.new("ERROR! Check Server Public Key."))
+            self.stack.get_page(self.stack.get_child_by_name("server")).set_needs_attention(True)
+            self.public_key_row.add_css_class(ERROR_CSS_CLASS)
+            return
+        if not self.endpoint_row.get_text().strip():
+            self.toastoverlay.add_toast(Adw.Toast.new("ERROR! Check Server Endpoint."))
+            self.stack.get_page(self.stack.get_child_by_name("server")).set_needs_attention(True)
+            self.endpoint_row.add_css_class(ERROR_CSS_CLASS)
+            return
+        try:
+            a = self.address_name_row.get_text()
+            if not a[-1].isdigit():
+                self.toastoverlay.add_toast(Adw.Toast.new("ERROR! Check Server Ipv4 Address."))
+                self.stack.get_page(self.stack.get_child_by_name("server")).set_needs_attention(True)
+                self.address_name_row.add_css_class(ERROR_CSS_CLASS)
+                return
+            cipv6 = self.config__["Server"]["Address Ipv6"]+self.config__["clients"][id_]["Address"].split("/")[0].split(".")[-1]+"/64"
+        except :
+            self.toastoverlay.add_toast(Adw.Toast.new("ERROR! Check Server Ipv4 Address."))
+            self.stack.get_page(self.stack.get_child_by_name("server")).set_needs_attention(True)
+            self.address_name_row.add_css_class(ERROR_CSS_CLASS)
+            return
+
+
+        temp = f"""[Interface]
+PrivateKey={self.config__["clients"][id_]["PrivateKey"]}
+DNS={self.config__["clients"][id_]["DNS"]}
+Address={self.config__["clients"][id_]["Address"]} , {cipv6}
+
+[Peer]
+PublicKey = {self.public_key_row.get_text().strip()}
+Endpoint = {self.endpoint_row.get_text().strip()}:{str(int(self.server_port_row.get_value()))}
+PersistentKeepalive = {self.config__["clients"][id_]["PersistentKeepalive"]}
+AllowedIPs = {self.config__["clients"][id_]["AllowedIPs"]}, ::/0"""
+        if generate_file:
+            if location_to_save:
+                tempd = location_to_save
+            else:
+                tempd = tempfile.mkdtemp()
+            tempd = os.path.join(default_save_files_location,self.config__["Server"]["FirewallType"]+"_"+datetime.datetime.now().strftime("%d_%m_%Y-%S:%M:%H"))
+            os.makedirs(tempd,exist_ok=True)
+            addrr = self.config__["clients"][id_]["Address"].strip().split("/")[0]
+            if addrr:
+                l = os.path.join(tempd,addrr)+".conf"
+            else:
+                l = os.path.join(tempd,id_)+".conf"
+            with open(l,"w") as mf:
+                mf.write(temp)
+                if not location_to_save:
+                    os.system(f"xdg-open {tempd}")
+                    self.toastoverlay.add_toast(Adw.Toast(title=f"Write To {l} Done.",timeout=2))
+        else:
+            clipboard = self.get_clipboard()
+            clipboard.set_content(Gdk.ContentProvider.new_for_value(temp))
+            self.toastoverlay.add_toast(Adw.Toast(title="Copy To Clipboard Done.",timeout=2))
+        print(temp)
+        return True
+
+    def on_open_save_location_action_activate(self,*a):
+        os.system(f"xdg-open {default_save_files_location}")
+
+    def run_about(self,*a):
+        about = Adw.AboutDialog.new()
+        about.add_credit_section("Developers",["Yucef Sourani"])
+        about.add_legal_section("License","© 2024 Yucef Sourani", Gtk.License.GPL_3_0 ,None)
+        about.add_link(PROG_NAME.title(),"https://github.com/yucefsourani/"+PROG_NAME)
+        about.set_application_name(PROG_NAME.title())
+        about.set_comments("Gui To Generate wireguard Config Files")
+        about.set_version("1.0")
+        about.set_developer_name("Yucef Sourani")
+        about.present(self)
+
+    def on_quit_action_actived(self,*a):
+        self.get_application().quit()
+
+    def create_peer_gui(self):
+        save_all_button_content = Adw.ButtonContent(label="Save All Files",icon_name="document-save-symbolic")
+        self.save_all_config_button = Gtk.Button.new()
+        #self.save_all_config_button.set_visible(False)
+        self.save_all_config_button.props.hexpand = True
+        self.save_all_config_button.set_child(save_all_button_content)
+        self.save_all_config_button.add_css_class("suggested-action")
+        spinner = Gtk.Spinner.new()
+        self.save_all_config_button.connect("clicked",self.on_save_all_peer_file_clicked)
+        self.headerbar.pack_start(spinner)
+        self.headerbar.pack_start(self.save_all_config_button)
+
+        peer_box = Gtk.Box.new( Gtk.Orientation.VERTICAL,5)
+        self.peer_page =  Adw.PreferencesPage.new()
+
+        peer_stack_page = self.stack.add_titled_with_icon(peer_box,"peer","Peer","network-transmit-receive-symbolic")
+        #self.stack.connect("notify::visible-child-name",self.on_stack_child_visible_changed)
+        self.peer_page.set_icon_name("network-server-symbolic")
+        add_peer_action_row = Adw.ButtonRow.new()
+        add_peer_action_row.add_css_class("suggested-action")
+        add_peer_action_row.connect("activated",self.on_add_peer_row_activated,self.peer_page)
+        add_peer_action_row.set_start_icon_name("list-add-symbolic")
+        add_peer_page_group =  Adw.PreferencesGroup.new()
+        add_page =  Adw.PreferencesPage.new()
+        add_peer_page_group.add(add_peer_action_row)
+        add_page.add(add_peer_page_group)
+        peer_box.append(add_page)
+        peer_box.append(self.peer_page)
+
+        for temp_info in self.config__["clients"].keys():
+            add_peer_page_group =  Adw.PreferencesGroup.new()
+            add_peer_page_group.set_title("Peer")
+            group_button_box   = Gtk.Box.new( Gtk.Orientation.HORIZONTAL,0)
+            group_button_box.add_css_class("linked")
+            delete_button      = Gtk.Button(icon_name="edit-delete-symbolic")
+            delete_button.add_css_class("destructive-action")
+            delete_button.connect("clicked",self.on_delete_peer_clicked,add_peer_page_group,temp_info)
+            generatekey_button = Gtk.Button(label="Generate Keys")
+            generatekey_button.add_css_class("suggested-action")
+            group_button_box.append(generatekey_button)
+            group_button_box.append(delete_button)
+            add_peer_page_group.set_header_suffix(group_button_box)
+            self.peer_page.add(add_peer_page_group)
+
+            generate_peer_config_row = Adw.PreferencesRow.new()
+            generate_peer_config_row_box = Gtk.Box.new( Gtk.Orientation.HORIZONTAL,0)
+            generate_peer_config_row_box.add_css_class("linked")
+            generate_peer_config_row_box.set_homogeneous(True)
+            generate_peer_config_row.set_child(generate_peer_config_row_box)
+
+            clipboard_button_content = Adw.ButtonContent(label="Generate To Clipboard",icon_name="edit-copy-symbolic")
+            clipboard_config_button = Gtk.Button.new()
+            clipboard_config_button.props.hexpand = True
+            clipboard_config_button.set_child(clipboard_button_content)
+            clipboard_config_button.add_css_class("suggested-action")
+            generate_peer_config_row_box.append(clipboard_config_button)
+
+            save_button_content = Adw.ButtonContent(label="Save To File",icon_name="document-save-symbolic")
+            save_config_button = Gtk.Button.new()
+            save_config_button.props.hexpand = True
+            save_config_button.set_child(save_button_content)
+            save_config_button.add_css_class("suggested-action")
+            generate_peer_config_row_box.append(save_config_button)
+
+            wgclient = WgClient(temp_info,self.config__)
+            save_config_button.bind_property("sensitive", wgclient, "sensitive", GObject.BindingFlags.BIDIRECTIONAL )
+            clipboard_config_button.bind_property("sensitive", wgclient, "sensitive", GObject.BindingFlags.BIDIRECTIONAL )
+            wgclient.props.privatekey          = self.config__["clients"][temp_info]["PrivateKey"]
+            wgclient.props.publickey           = self.config__["clients"][temp_info]["PublicKey"]
+            wgclient.props.dns                 = self.config__["clients"][temp_info]["DNS"]
+            wgclient.props.allowedips          = self.config__["clients"][temp_info]["AllowedIPs"]
+            wgclient.props.persistentKeepalive = self.config__["clients"][temp_info]["PersistentKeepalive"]
+            wgclient.props.address             = self.config__["clients"][temp_info]["Address"]
+
+            address_row             = PeerRow(wgclient,"address")
+            privatekey_row          = PeerRow(wgclient,"privatekey")
+            publickey_row           = PeerRow(wgclient,"publickey")
+            dns_row                 = PeerRow(wgclient,"dns")
+            allowedips_row          = PeerRow(wgclient,"allowedips")
+            persistentKeepalive_row = PeerRow(wgclient,"persistentKeepalive")
+
+            generatekey_button.connect("clicked",self.on_generatekey_peer_clicked,privatekey_row,publickey_row,temp_info)
+            clipboard_config_button.connect("clicked",self.on_peer_generate_config_clicked,temp_info)
+            save_config_button.connect("clicked",self.on_peer_generate_config_clicked,temp_info,True)
+
+            add_peer_page_group.add(address_row.row)
+            add_peer_page_group.add(privatekey_row.row)
+            add_peer_page_group.add(publickey_row.row)
+            add_peer_page_group.add(dns_row.row)
+            add_peer_page_group.add(allowedips_row.row)
+            add_peer_page_group.add(persistentKeepalive_row.row)
+            add_peer_page_group.add(generate_peer_config_row)
+
+    def on_save_all_peer_file_clicked(self,button):
+        #tempd    = tempfile.mkdtemp()
+        tempd = os.path.join(default_save_files_location,self.config__["Server"]["FirewallType"]+"_"+datetime.datetime.now().strftime("%d_%m_%Y-%S:%M:%H"))
+        os.makedirs(tempd,exist_ok=True)
+        result_l = []
+        for k in self.config__["clients"].keys():
+            result =  self.on_peer_generate_config_clicked(button,k,True,tempd)
+            result_l.append(result)
+        if not any(result_l):
+            self.toastoverlay.add_toast(Adw.Toast(title="Save Peer Files Failed."))
+        else:
+            if not all(result_l):
+                self.toastoverlay.add_toast(Adw.Toast(title="Save Some Peer File Failed."))
+            else:
+                self.toastoverlay.add_toast(Adw.Toast(title="Save Peer Files Done.",timeout=2))
+
+        if self.open_generate_server_config(button,True,tempd):
+            self.toastoverlay.add_toast(Adw.Toast(title="Save Server File Done.",timeout=2))
+        else:
+            self.toastoverlay.add_toast(Adw.Toast(title="Save Server File Failed."))
+        os.system(f"xdg-open {tempd}")
+
+    #def on_stack_child_visible_changed(self,stack,props):
+     #   if stack.props.visible_child_name == "peer":
+      #      self.save_all_config_button.set_visible(True)
+      #  else:
+       #     self.save_all_config_button.set_visible(False)
+
+    def on_generatekey_peer_clicked(self,button,privatekey_row,publickey_row,id_):
+        dialog = Adw.AlertDialog.new("Generate Keypair","generate keypair")
+        dialog.add_response("3007","Generate")
+        dialog.add_response("0205","Cancel")
+        dialog.choose(self,None,self.on_peer_generate_keypair_dialog_alert_done,privatekey_row,publickey_row,id_)
+
+    def on_peer_generate_keypair_dialog_alert_done(self,dialog, resutl, privatekey_row,publickey_row,id_):
+        try:
+            response = dialog.choose_finish(resutl)
+            if response == "3007":
+                private_key,public_key = Key.key_pair()
+                GLib.timeout_add(100,privatekey_row.row.set_text,str(private_key))
+                GLib.timeout_add(100,publickey_row.row.set_text,str(public_key))
+                self.config__["clients"][id_]["PrivateKey"] = private_key
+                self.config__["clients"][id_]["PublicKey"]  = public_key
+                change_metadata_info(self.config__)
+                self.toastoverlay.add_toast(Adw.Toast(title="Generate Kaypair Done.",timeout=2))
+        except :
+            self.toastoverlay.add_toast(Adw.Toast.new("Generate Kaypair Failed."))
+            return
+
+    def on_delete_peer_clicked(self,button,add_peer_page_group,id_):
+        dialog = Adw.AlertDialog.new("Delete Peer","delete peer?")
+        dialog.add_response("3007","Delete")
+        dialog.add_response("0205","Cancel")
+        dialog.choose(self,None,self._on_delete_peer_clicked,add_peer_page_group,id_)
+
+    def _on_delete_peer_clicked(self,dialog, resutl,add_peer_page_group,id_):
+        try:
+            response = dialog.choose_finish(resutl)
+            if response == "3007":
+                if id_ in self.config__["clients"].keys():
+                    del self.config__["clients"][id_]
+                    scrolled_window = add_peer_page_group.get_parent().get_parent().get_parent().get_parent()
+                    v = scrolled_window.get_vadjustment()
+                    current_location = v.get_value()
+                    self.peer_page.remove(add_peer_page_group)
+                    change_metadata_info(self.config__)
+                    self.toastoverlay.add_toast(Adw.Toast(title="Delete Peer Done.",timeout=2))
+                    GLib.timeout_add(100,v.set_value,current_location)
+        except :
+            self.toastoverlay.add_toast(Adw.Toast.new("Delete Peer Failed."))
+            return
+
+    def open_generate_server_config(self,button=None,generate_file=False,location_to_save=""):
+        if not self.public_key_row.get_text().strip() :
+            self.toastoverlay.add_toast(Adw.Toast.new("ERROR! Check Server Public Key."))
+            self.public_key_row.add_css_class(ERROR_CSS_CLASS)
+            return
+        if not self.private_key_row.get_text().strip():
+            self.toastoverlay.add_toast(Adw.Toast.new("ERROR! Check Server Private Key."))
+            self.private_key_row.add_css_class(ERROR_CSS_CLASS)
+            return
+        if not self.endpoint_row.get_text().strip():
+            self.toastoverlay.add_toast(Adw.Toast.new("ERROR! Check Server Endpoint."))
+            self.endpoint_row.add_css_class(ERROR_CSS_CLASS)
+            return
+        if not self.address_name_row.get_text().strip():
+            self.toastoverlay.add_toast(Adw.Toast.new("ERROR! Check Server Address."))
+            self.address_name_row.add_css_class(ERROR_CSS_CLASS)
+            return
+        a = self.address_name_row.get_text().strip()
+        if not a[-1].isdigit() or "/" not in a:
+            self.toastoverlay.add_toast(Adw.Toast.new("ERROR! Check Server Ipv4 Address."))
+            self.address_name_row.add_css_class(ERROR_CSS_CLASS)
+            return
+        try:
+            av6 = self.config__["Server"]["Address Ipv6"]+a.split("/")[0].split(".")[-1]+"/64"
+        except:
+            self.toastoverlay.add_toast(Adw.Toast.new("ERROR! Check Server Ipv4 Address."))
+            self.address_name_row.add_css_class(ERROR_CSS_CLASS)
+            return
+        if not self.iface_name_row.get_text().strip():
+            self.toastoverlay.add_toast(Adw.Toast.new("ERROR! Check Iface Name."))
+            self.iface_name_row.add_css_class(ERROR_CSS_CLASS)
+            return
+        if self.config__["Server"]["FirewallType"] == "Firewalld":
+            firewall_postup_postdown =ditro_firewall_config[self.config__["Server"]["FirewallType"]].format(int(self.server_port_row.get_value()),
+                                                                                                       self.iface_name_row.get_text().strip(),
+                                                                                                       int(self.server_port_row.get_value()),
+                                                                                                       self.iface_name_row.get_text().strip())
+        elif self.config__["Server"]["FirewallType"] == "Ufw":
+            gateway_interface = self.default_gateway.props.text.strip()
+            if not gateway_interface:
+                gateway_interface = "eth0"
+                self.default_gateway.props.text = "eth0"
+            firewall_postup_postdown =ditro_firewall_config[self.config__["Server"]["FirewallType"]].format(int(self.server_port_row.get_value()),
+                                                                                                       self.iface_name_row.get_text().strip(),
+                                                                                                       gateway_interface)
+        else:
+            firewall_postup_postdown = ditro_firewall_config[self.config__["Server"]["FirewallType"]]
+        temp = f"""[Interface]
+ListenPort = {str(int(self.server_port_row.get_value()))}
+PrivateKey = {self.private_key_row.get_text().strip()}
+Address    = {a} , {av6}
+{firewall_postup_postdown}
+
+"""
+        for id_ in self.config__["clients"]:
+            peer = self.config__["clients"][id_]
+            try:
+                address = peer["Address"].strip()
+                cipv6   = self.config__["Server"]["Address Ipv6"]+address.split("/")[0].split(".")[-1]+"/64"
+            except Exception as e :
+                print(e)
+                print(f"Generate Client with Address {address} Failed.")
+                continue
+            privatekey          = peer["PrivateKey"].strip()
+            publickey           = peer["PublicKey"].strip()
+            allowedips          = peer["Address"].strip()+","+cipv6
+            persistentkeepalive = peer["PersistentKeepalive"].strip()
+            dns                 = peer["DNS"].strip()
+            if not all([privatekey,publickey,allowedips,persistentkeepalive,dns]):
+                continue
+            if not allowedips[-1].isdigit() or "/" not in allowedips:
+                continue
+            temp +=f"""[Peer]
+PublicKey  = {publickey}
+AllowedIPs = {allowedips}
+\n"""
+        if generate_file:
+            if location_to_save:
+                tempd = location_to_save
+            else:
+                tempd = tempfile.mkdtemp()
+            tempd = os.path.join(default_save_files_location,self.config__["Server"]["FirewallType"]+"_"+datetime.datetime.now().strftime("%d_%m_%Y-%S:%M:%H"))
+            os.makedirs(tempd,exist_ok=True)
+            l = os.path.join(tempd,self.iface_name_row.get_text().strip())+".conf"
+            with open(l,"w") as mf:
+                mf.write(temp)
+                if not location_to_save:
+                    os.system(f"xdg-open {tempd}")
+                    self.toastoverlay.add_toast(Adw.Toast(title=f"Write To {l} Done.",timeout=2))
+        else:
+            clipboard = self.get_clipboard()
+            clipboard.set_content(Gdk.ContentProvider.new_for_value(temp))
+            self.toastoverlay.add_toast(Adw.Toast(title="Copy To Clipboard Done.",timeout=2))
+        print(temp)
+        return True
+
+    def create_server_gui(self):
+        self.server_page =  Adw.PreferencesPage.new()
+        self.server_page.set_icon_name("network-server-symbolic")
+        self.server_page_group =  Adw.PreferencesGroup.new()
+        self.server_page.add(self.server_page_group)
+        self.server_page_group.set_title("Server")
+
+
+        generate_server_config_row_box = Gtk.Box.new( Gtk.Orientation.HORIZONTAL,0)
+        generate_server_config_row_box.add_css_class("linked")
+        generate_server_config_row_box.set_homogeneous(True)
+
+        c_generate_and_save_config_button_content = Adw.ButtonContent(label="Clipboard",icon_name="edit-copy-symbolic")
+        c_generate_and_save_config_button = Gtk.Button.new()
+        generate_server_config_row_box.append(c_generate_and_save_config_button)
+        c_generate_and_save_config_button.set_child(c_generate_and_save_config_button_content)
+        c_generate_and_save_config_button.add_css_class("suggested-action")
+        c_generate_and_save_config_button.connect("clicked",self.open_generate_server_config)
+
+        generate_and_save_config_button_content = Adw.ButtonContent(label="Save",icon_name="document-save-symbolic")
+        generate_and_save_config_button = Gtk.Button.new()
+        generate_server_config_row_box.append(generate_and_save_config_button)
+        generate_and_save_config_button.set_child(generate_and_save_config_button_content)
+        generate_and_save_config_button.add_css_class("suggested-action")
+        generate_and_save_config_button.connect("clicked",self.open_generate_server_config,True)
+
+
+        self.server_page_group.set_header_suffix(generate_server_config_row_box)
+
+
+        self.server_page_key_group =  Adw.PreferencesGroup.new()
+        generate_keypair_button_content = Adw.ButtonContent(label="Generate Keypair",icon_name="dialog-password-symbolic")
+        generate_keypair_button = Gtk.Button.new()
+        generate_keypair_button.set_child(generate_keypair_button_content)
+        generate_keypair_button.add_css_class("suggested-action")
+        generate_keypair_button.connect("clicked",self.open_generate_keypair_dialog_alert,self.server_page_key_group)
+        self.server_page_key_group.set_header_suffix(generate_keypair_button)
+        self.server_page.add(self.server_page_key_group)
+        self.server_page_key_group.set_title("Keys")
+
+        self.stack.add_titled_with_icon(self.server_page,"server","Server","network-server-symbolic")
+
+        self.default_gateway = Gtk.Entry.new()
+        self.default_gateway.props.hexpand = False
+        self.default_gateway.props.text = "eth0"
+        self.firewall_type = Adw.ComboRow.new()
+        self.firewall_type.add_suffix(self.default_gateway)
+        self.firewall_type.set_title("Firewall")
+        self.firewall_type.set_subtitle("Add Firewall conf for")
+        ditro_model = Gtk.StringList.new(list(ditro_firewall_config.keys()))
+        self.firewall_type.set_model(ditro_model)
+        v = self.config__["Server"]["FirewallType"].strip()
+        if v:
+            firewall_config = ditro_firewall_config[v]
+            v = [i.get_string() for i in list(ditro_model)].index(v)
+            self.firewall_type.set_selected(v)
+        else:
+            self.firewall_type.set_selected(0)
+            self.config__["Server"]["FirewallType"] = "Firewalld"
+            change_metadata_info(self.config__)
+        self.server_page_group.add(self.firewall_type)
+        self.firewall_type.connect("notify::selected",self.on_firewall_type_changed)
+        if self.config__["Server"]["FirewallType"] == "Ufw":
+            self.default_gateway.set_visible(True)
+        else:
+            self.default_gateway.set_visible(False)
+        self.iface_name_row = Adw.EntryRow.new()
+        v = self.config__["Server"]["Iface Name"].strip()
+        if v:
+            self.iface_name_row.set_text(v)
+        else:
+            self.iface_name_row.set_text("wg0")
+            self.config__["Server"]["Iface Name"] = "wg0"
+            change_metadata_info(self.config__)
+        self.iface_name_row.set_title("Iface Name")
+        self.iface_name_row.set_input_hints( Gtk.InputHints.NO_EMOJI |Gtk.InputHints.NO_SPELLCHECK)
+        self.iface_name_row.set_show_apply_button(True)
+        self.iface_name_row.connect("apply",self.change_server_settings_changed,"Iface Name")
+        self.server_page_group.add(self.iface_name_row)
+
+        self.address_name_row = Adw.EntryRow.new()
+        v = self.config__["Server"]["Address"].strip()
+        if v:
+            self.address_name_row.set_text(v)
+        else:
+            self.address_name_row.set_text("10.99.0.1/32")
+            self.config__["Server"]["Address"] = "10.99.0.1/32"
+            change_metadata_info(self.config__)
+        self.address_name_row.set_title("Address")
+        self.address_name_row.set_input_hints( Gtk.InputHints.NO_EMOJI |Gtk.InputHints.NO_SPELLCHECK)
+        self.address_name_row.set_show_apply_button(True)
+        self.address_name_row.connect("apply",self.change_server_settings_changed,"Address")
+        self.server_page_group.add(self.address_name_row)
+
+
+        v = self.config__["Server"]["Address Ipv6"].strip()
+        if not v:
+            self.config__["Server"]["Address Ipv6"] = get_ipv6_base()
+            change_metadata_info(self.config__)
+
+        self.private_key_row = Adw.PasswordEntryRow.new()
+        self.private_key_row.add_css_class("keys_label")
+        v = self.config__["Server"]["PrivateKey"].strip()
+        if v:
+            self.private_key_row.set_text(v)
+        else:
+            self.private_key_row.add_css_class(ERROR_CSS_CLASS)
+        self.private_key_row.set_title("PrivateKey")
+        self.private_key_row.set_input_hints( Gtk.InputHints.NO_EMOJI |Gtk.InputHints.NO_SPELLCHECK)
+        self.private_key_row.set_show_apply_button(True)
+        self.private_key_row.connect("apply",self.change_server_settings_changed,"PrivateKey")
+        self.server_page_key_group.add(self.private_key_row)
+        self.server_page_key_group.__setattr__("PrivateKey",self.private_key_row)
+
+
+        self.public_key_row = Adw.EntryRow.new()
+        self.public_key_row.add_css_class("keys_label")
+        v = self.config__["Server"]["PublicKey"].strip()
+        if v:
+            self.public_key_row.set_text(v)
+        else:
+            self.public_key_row.add_css_class(ERROR_CSS_CLASS)
+        self.public_key_row.set_title("PublicKey")
+        self.public_key_row.set_input_hints( Gtk.InputHints.NO_EMOJI |Gtk.InputHints.NO_SPELLCHECK)
+        self.public_key_row.set_show_apply_button(True)
+        self.public_key_row.connect("apply",self.change_server_settings_changed,"PublicKey")
+        self.server_page_key_group.add(self.public_key_row)
+        self.server_page_key_group.__setattr__("PublicKey",self.public_key_row)
+
+        self.endpoint_row = Adw.EntryRow.new()
+        v = self.config__["Server"]["Endpoint"].strip()
+        if v:
+            self.endpoint_row.set_text(v)
+        else:
+            self.endpoint_row.add_css_class(ERROR_CSS_CLASS)
+        self.endpoint_row.set_title("Endpoint")
+        self.endpoint_row.set_input_hints( Gtk.InputHints.NO_EMOJI |Gtk.InputHints.NO_SPELLCHECK)
+        self.endpoint_row.set_show_apply_button(True)
+        self.endpoint_row.connect("apply",self.change_server_settings_changed,"Endpoint")
+        self.server_page_group.add(self.endpoint_row)
+
+
+        self.server_port_row = Adw.SpinRow.new_with_range(49152,65535,1)
+        self.server_port_row.set_title("Listen Port")
+        v = self.config__["Server"]["ListenPort"].strip()
+        if v:
+            self.server_port_row.set_value(int(v))
+        else:
+            self.server_port_row.set_value(51820)
+            self.config__["Server"]["ListenPort"] = "51820"
+            change_metadata_info(self.config__)
+        self.server_port_row.connect("notify::value",self.on_port_change)
+        self.server_page_group.add(self.server_port_row)
+
+    def on_firewall_type_changed(self,row,prop):
+        firewall_name = row.get_model().get_string(row.props.selected)
+        if firewall_name == "Ufw":
+            self.default_gateway.set_visible(True)
+        else:
+            self.default_gateway.set_visible(False)
+        firewall_config = ditro_firewall_config[firewall_name]
+        self.config__["Server"]["FirewallType"] = firewall_name
+        change_metadata_info(self.config__)
+
+
+class MyApp(Adw.Application):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def do_activate(self):
+        active_window = self.props.active_window
+        if active_window:
+            active_window.present()
+        else:
+            self.win = MainWindow(application=self)
+            self.win.present()
+
+def main():
+    app = MyApp(application_id="com.github.yucefsourani.simplewgconfig",flags= Gio.ApplicationFlags.FLAGS_NONE)
+    app.run(sys.argv)
+
+if __name__ == "__main__":
+    main()
