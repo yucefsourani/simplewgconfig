@@ -32,7 +32,8 @@ from binascii import hexlify
 import codecs
 import x25519
 
-
+#icon_file_location = os.path.join(os.path.dirname(os.path.abspath(__file__)),"hicolor/512x512/apps/com.github.yucefsourani.simplewgconfig.png")
+icon = "com.github.yucefsourani.simplewgconfig"
 class Key():
     @staticmethod
     def key_pair():
@@ -663,6 +664,7 @@ AllowedIPs = {self.config__["clients"][id_]["AllowedIPs"]}, ::/0"""
         about.set_comments("Gui To Generate wireguard Config Files")
         about.set_version("1.0")
         about.set_developer_name("Yucef Sourani")
+        about.set_application_icon(icon)
         about.present(self)
 
     def on_quit_action_actived(self,*a):
