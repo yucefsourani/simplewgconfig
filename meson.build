@@ -36,3 +36,27 @@ foreach size : allsize
         install_dir: join_paths(get_option('datadir'), 'icons', icon_dir)
      )
 endforeach
+
+
+
+desktop_file = ('@0@.desktop').format(application_id)
+install_data(
+  desktop_file,
+  install_dir: get_option('datadir') / 'applications'
+)
+
+desktop_utils = find_program('desktop-file-validate', required: false)
+if desktop_utils.found()
+  test('Validate desktop file', desktop_utils, args: [desktop_file])
+endif
+
+
+appstream_file = ('@0@.metainfo.xml').format(application_id)
+install_data(
+  appstream_file,
+  install_dir: get_option('datadir') / 'metainfo'
+)
+
+appstreamcli = find_program('appstreamcli', required: false, disabler: true)
+test('Validate appstream file', appstreamcli,
+     args: ['validate', '--no-net', '--explain', appstream_file])

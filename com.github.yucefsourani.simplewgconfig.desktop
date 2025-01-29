@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=simplewgconfig
+Exec=simplewgconfig
+Icon=com.github.yucefsourani.simplewgconfig
+Terminal=false
+Type=Application
+Categories=GTK;Network;Utility;
+Keywords=GTK;wireguard;vpn;
+StartupNotify=true
+DBusActivatable=true
