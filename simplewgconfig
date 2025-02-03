@@ -380,7 +380,7 @@ fix_locale()
 class MainWindow(Adw.ApplicationWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.set_size_request(420, 420)
+        self.set_size_request(300, 300)
         #self.set_default_size(800, 600)
         self.maximize()
         style_provider = Gtk.CssProvider()
@@ -483,7 +483,7 @@ class MainWindow(Adw.ApplicationWindow):
             return
 
     def open_generate_keypair_dialog_alert(self,button,server_page_key_group):
-        dialog = Adw.AlertDialog.new("Generate Keypair","generate keypair")
+        dialog = Adw.AlertDialog.new("Generate Key","generate key")
         dialog.add_response("3007","Generate")
         dialog.add_response("0205","Cancel")
         dialog.choose(self,None,self.on_generate_keypair_dialog_alert_done,server_page_key_group)
@@ -555,14 +555,14 @@ class MainWindow(Adw.ApplicationWindow):
         generate_peer_config_row_box.set_homogeneous(True)
         generate_peer_config_row.set_child(generate_peer_config_row_box)
 
-        clipboard_button_content = Adw.ButtonContent(label="Generate To Clipboard",icon_name="edit-copy-symbolic")
+        clipboard_button_content = Adw.ButtonContent(label="Clipboard",icon_name="edit-copy-symbolic")
         clipboard_config_button = Gtk.Button.new()
         clipboard_config_button.props.hexpand = True
         clipboard_config_button.set_child(clipboard_button_content)
         clipboard_config_button.add_css_class("suggested-action")
         generate_peer_config_row_box.append(clipboard_config_button)
 
-        save_button_content = Adw.ButtonContent(label="Save To File",icon_name="document-save-symbolic")
+        save_button_content = Adw.ButtonContent(label="Save",icon_name="document-save-symbolic")
         save_config_button = Gtk.Button.new()
         save_config_button.props.hexpand = True
         save_config_button.set_child(save_button_content)
@@ -720,14 +720,14 @@ AllowedIPs = {self.config__["clients"][id_]["AllowedIPs"]}, ::/0"""
             generate_peer_config_row_box.set_homogeneous(True)
             generate_peer_config_row.set_child(generate_peer_config_row_box)
 
-            clipboard_button_content = Adw.ButtonContent(label="Generate To Clipboard",icon_name="edit-copy-symbolic")
+            clipboard_button_content = Adw.ButtonContent(label="Clipboard",icon_name="edit-copy-symbolic")
             clipboard_config_button = Gtk.Button.new()
             clipboard_config_button.props.hexpand = True
             clipboard_config_button.set_child(clipboard_button_content)
             clipboard_config_button.add_css_class("suggested-action")
             generate_peer_config_row_box.append(clipboard_config_button)
 
-            save_button_content = Adw.ButtonContent(label="Save To File",icon_name="document-save-symbolic")
+            save_button_content = Adw.ButtonContent(label="Save",icon_name="document-save-symbolic")
             save_config_button = Gtk.Button.new()
             save_config_button.props.hexpand = True
             save_config_button.set_child(save_button_content)
@@ -792,7 +792,7 @@ AllowedIPs = {self.config__["clients"][id_]["AllowedIPs"]}, ::/0"""
        #     self.save_all_config_button.set_visible(False)
 
     def on_generatekey_peer_clicked(self,button,privatekey_row,publickey_row,id_):
-        dialog = Adw.AlertDialog.new("Generate Keypair","generate keypair")
+        dialog = Adw.AlertDialog.new("Generate Key","generate key")
         dialog.add_response("3007","Generate")
         dialog.add_response("0205","Cancel")
         dialog.choose(self,None,self.on_peer_generate_keypair_dialog_alert_done,privatekey_row,publickey_row,id_)
@@ -962,7 +962,7 @@ AllowedIPs = {allowedips}
 
 
         self.server_page_key_group =  Adw.PreferencesGroup.new()
-        generate_keypair_button_content = Adw.ButtonContent(label="Generate Keypair",icon_name="dialog-password-symbolic")
+        generate_keypair_button_content = Adw.ButtonContent(label="Generate Key",icon_name="dialog-password-symbolic")
         generate_keypair_button = Gtk.Button.new()
         generate_keypair_button.set_child(generate_keypair_button_content)
         generate_keypair_button.add_css_class("suggested-action")

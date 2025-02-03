@@ -5,10 +5,10 @@
     "sdk" : "org.gnome.Sdk",
     "command" : "simplewgconfig",
     "finish-args" : [
-	  "--share=ipc",
-	  "--socket=fallback-x11",
-	  "--socket=wayland",
-	  "--device=dri"
+        "--share=ipc",
+        "--socket=fallback-x11",
+        "--socket=wayland",
+        "--device=dri"
     ],
     "cleanup" : [
         "/include",
@@ -22,20 +22,20 @@
         "*.a"
     ],
     "modules" : [
-	{
-	    "name": "python3-x25519",
-	    "buildsystem": "simple",
-	    "build-commands": [
-		"pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"x25519\" --no-build-isolation"
-	    ],
-	    "sources": [
-		{
-		    "type": "file",
-		    "url": "https://files.pythonhosted.org/packages/f2/d1/66c637eb8e7a9601675bf7f04bb9a3015358a0f49e4c31d29a2b9a9d72d9/x25519-0.0.2-py3-none-any.whl",
-		    "sha256": "5c0833260a548bea9137a5a1b5c30334b751a59d148a62832df0c9e7b919ce99"
-		}
-	    ]
-	},
+        {
+            "name" : "python3-x25519",
+            "buildsystem" : "simple",
+            "build-commands" : [
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"x25519\" --no-build-isolation"
+            ],
+            "sources" : [
+                {
+                    "type" : "file",
+                    "url" : "https://files.pythonhosted.org/packages/f2/d1/66c637eb8e7a9601675bf7f04bb9a3015358a0f49e4c31d29a2b9a9d72d9/x25519-0.0.2-py3-none-any.whl",
+                    "sha256" : "5c0833260a548bea9137a5a1b5c30334b751a59d148a62832df0c9e7b919ce99"
+                }
+            ]
+        },
         {
             "name" : "simplewgconfig",
             "builddir" : true,
@@ -45,7 +45,13 @@
                     "type" : "git",
                     "url" : "file:///home/yuceff28/Projects"
                 }
+            ],
+            "config-opts" : [
+                "--libdir=lib"
             ]
         }
-    ]
+    ],
+    "build-options" : {
+        "env" : {        }
+    }
 }
